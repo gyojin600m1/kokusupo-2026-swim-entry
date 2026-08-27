@@ -383,8 +383,18 @@ for(const e of ENTRIES){
   else o.evs.push(e);
 }
 const SWL = [...SW.values()].filter(s => s.evs.length || s.name);
+// 組み合わせ表には公式カナがないため、推定読みの誤りを補う高確度の別読み。
+// UIや表示データは変えず、検索語にだけ反映する。
+const KANA_ALIASES = [["加藤", "かとう"]];
+function kanaAliases(name){
+  const n = String(name||"");
+  return KANA_ALIASES.filter(([kanji]) => n.startsWith(kanji)).map(([,kana]) => kana).join("/");
+}
 for(const s of SWL){
-  s._n = nx(s.name); s._k = nk(s.kana) + nk(s.name); s._t = nx(s.team);
+  s._n = nx(s.name);
+  s._ks = String(s.kana||"").split("/").concat(kanaAliases(s.name).split("/"))
+    .map(nk).filter(Boolean);
+  s._t = nx(s.team);
   s.evs.sort((a,b)=> (a.programNos?.[0]||999) - (b.programNos?.[0]||999));
 }
 
@@ -584,7 +594,7 @@ function viewSw(){
   let list = SWL;
   if(ST.hl) list = list.filter(s => isHL(s.team));
   if(ST.gender !== "all") list = list.filter(s => (ST.gender==="f") === isF(s.gender));
-  if(q) list = list.filter(s => s._n.includes(q) || s._t.includes(q) || (qk && s._k.includes(qk)));
+  if(q) list = list.filter(s => s._n.includes(q) || s._t.includes(q) || (qk && s._ks.some(k => k.startsWith(qk))));
 
   const body = !ST.q && ST.gender==="all" && !ST.hl
     ? `<div class="empty"><span class="e">🔍</span>選手名（ひらがなでも可）や<br>チーム名を入れてください<br>下のチップをタップしても出ます</div>`
@@ -627,7 +637,7 @@ function viewEv(){
         <span class="pill ${gcls(e.gender)}">${isF(e.gender)?"女子":"男子"}</span>
         ${tags(e)}
       </div></div>`).join("");
-  return `<select id="evSel">${opts}</select>
+  return `<select id="evSel" aria-label="表示する種目">${opts}</select>
     ${stdHead(g.list)}
     <div class="count">${ordLabel()}・<b>${g.list.length}</b>名</div>${rows}`;
 }
@@ -733,7 +743,7 @@ function rcHead(r){
 }
 function viewLn(){
   const opts = RACES.map(r=>`<option value="${esc(r.key)}" ${ST.raceKey===r.key?"selected":""}>No.${r.nos.join("・")} ${esc(r.day||"")} ${r.mixGender?"男女":glabel(r.gender)} ${esc(raceEvent(r))}${r.label?" "+esc(r.label):""}</option>`).join("");
-  const head = `<select id="lnSel"><option value="">— レースを選んでください —</option>${opts}</select>`;
+  const head = `<select id="lnSel" aria-label="組・レーンを表示するレース"><option value="">— レースを選んでください —</option>${opts}</select>`;
 
   const r = ST.raceKey == null ? null : RACES.find(x => x.key === ST.raceKey);
   if(!r)
@@ -741,7 +751,12 @@ function viewLn(){
 
   const list = raceList(r);
   const UNIT = list.length && list.every(e => e.isRelay) ? "チーム" : "名";
-  if(!list.length) return head + rcHead(r) + `<div class="empty"><span class="e">🫧</span>このレースの申込がありません</div>`;
+  if(!list.length){
+    const empty = r.round === "決勝"
+      ? "決勝の組・レーンは予選終了後に決定します（当日発表）"
+      : "このレースの申込がありません";
+    return head + rcHead(r) + `<div class="empty"><span class="e">🫧</span>${empty}</div>`;
+  }
 
   const confirmed = META.laneConfirmed && list.every(e => e.heat && e.lane != null);
   let heats;

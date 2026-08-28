@@ -529,7 +529,9 @@ function swCard(s, i, noTeamPill){
   const g = gcls(s.gender);
   const kn = (META.showKana && s.kana) ? `<span class="sw-kn">${esc(s.kana)}</span>` : "";
   const open = ST.open.has(KEY(s.evs[0]||s)) ? " open" : "";
-  const evs = s.evs.map(e => `<div class="ev">
+  // 種目行タップで組・レーンへジャンプ（そのレースが RACE_BY_NO にあるときだけ）
+  const jn = e => (META.lanePrediction!==false && e.programNos?.length) ? ` data-jn="${e.programNos[0]}" style="cursor:pointer"` : "";
+  const evs = s.evs.map(e => `<div class="ev"${jn(e)}>
       <span class="no">${e.programNos?.length ? "No."+e.programNos.join("/") : ""}</span>
       <span class="nm">${esc(e.event || ((e.distance||"")+" "+(e.stroke||"")))}${tags(e)}</span>
       ${tmTag(e,"span","tm")}</div>`).join("");
@@ -815,6 +817,11 @@ function bind(){
     const k = c.dataset.k;
     if(ST.open.has(k)) ST.open.delete(k); else ST.open.add(k);
     c.classList.toggle("open");
+  });
+  M.querySelectorAll("[data-jn]").forEach(b => b.onclick = ev => {
+    ev.stopPropagation();
+    const r = RACE_BY_NO.get(+b.dataset.jn);
+    if(r){ ST.raceKey = r.key; ST.tab = "ln"; render(); }
   });
   const back = M.querySelector("#back"); if(back) back.onclick = () => { ST.pgNo = null; render(); };
   const toLn = M.querySelector("#toLn"); if(toLn) toLn.onclick = () => {

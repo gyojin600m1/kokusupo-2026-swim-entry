@@ -392,6 +392,49 @@ def main():
         s['done'] = n_ok > 0
         log(f'No.{no} {p["gender"]} {p["distance"]} {p["stroke"]} 決勝のスタートリスト: {n_ok}/{len(rows)}件' + (f'・補欠{len(subs)}' if subs else ''))
 
+    # ===== 0.5) 電光掲示板（LiveResults）の組ごとのタイム：公式PDFが来るまでの速報 =====
+    lh = load(os.path.join(HERE, 'live_heats.json'), {})
+    live_last = None
+    for key, h in lh.items():
+        no, heat = h.get('no'), h.get('heat')
+        p = pinfo.get(no)
+        if not p or not h.get('lanes'):
+            continue
+        if live_last is None or h.get('t', 0) > live_last[2]:
+            live_last = (no, heat, h.get('t', 0))
+        if st.get(str(no), {}).get('done'):
+            continue                                     # 公式の結果が入っている種目は触らない
+        relay = no in is_relay
+        pool = d['relays'] if relay else d['entries']
+        for lane, v in h['lanes'].items():
+            tm = (v.get('tm') or '').strip()
+            if not tm:
+                continue
+            if p['round'] == '予選':
+                e, _ = find_row(pool, no, heat, int(lane), v.get('name', ''), v.get('team', ''), relay)
+            else:
+                e, made = final_row(pool, pkey, no, keyof[no], v.get('name', ''), v.get('team', ''), relay, heat, int(lane))
+                if e is not None and (made or e.get('lane') != int(lane)):
+                    e['heat'], e['lane'] = heat, int(lane)
+                    e['note'] = f'決勝 {int(lane)}レーン'
+                    changed += 1
+            if e is None:
+                continue
+            res = dict(e.get('result') or {})
+            if 'rank' in res:
+                continue                                 # 公式(PDF)の値を優先
+            new = dict(res)
+            if TIME.fullmatch(tm):
+                new['time'] = tm
+                new.pop('note', None)
+                if v.get('rec'):
+                    new['rec'] = v['rec']
+            else:
+                new['note'] = tm                         # 失格・棄権など
+            if new != res:
+                e['result'] = new
+                changed += 1
+
     # ===== 1) SEIKO 本線 =====
     for p in prog:
         no, dn = p['no'], dayno.get(p['day'], 1)
@@ -540,19 +583,23 @@ def main():
         log('  未突合: ' + ' / '.join(unmatched[:8]) + (' …' if len(unmatched) > 8 else ''))
 
     # ===== 3) 速報のまとめ（時計は入れない）=====
-    fin = sorted({n for e in d['entries'] + d['relays'] if e.get('result') for n in (e.get('programNos') or [])})
-    if fin:
-        last = fin[-1]
-        p = pinfo[last]
-        pool = d['relays'] if last in is_relay else d['entries']
-        top = sorted([e for e in pool if last in (e.get('programNos') or []) and (e.get('result') or {}).get('rank')],
-                     key=lambda e: e['result']['rank'])[:3]
-        medal = {1: '🥇', 2: '🥈', 3: '🥉'} if p['round'] == '決勝' else {1: '1位 ', 2: '2位 ', 3: '3位 '}
-        line = '　'.join(f"{medal.get(e['result']['rank'], '')}{e.get('name') or e.get('team')} {e['result'].get('time', '')}"
-                         for e in top)
-        note = (f"🔴 **速報中**　終了 {len(fin)}/106種目\n"
-                f"**直近 No.{last} {p['gender']} {p['distance']} {p['stroke']} {p['round']}**"
-                + (("\n" + line) if line else ""))
+    done_nos = sorted(int(k) for k, v in st.items() if v.get('done'))
+    fin = done_nos
+    if fin or live_last:
+        note = f"🔴 **速報中**　終了 {len(fin)}/106種目"
+        if live_last and time.time() - live_last[2] < 40 * 60:
+            lp = pinfo[live_last[0]]
+            note += f"　いま No.{live_last[0]} {lp['gender']} {lp['distance']} {lp['stroke']} {lp['round']} 第{live_last[1]}組まで"
+        if fin:
+            last = fin[-1]
+            p = pinfo[last]
+            pool = d['relays'] if last in is_relay else d['entries']
+            top = sorted([e for e in pool if last in (e.get('programNos') or []) and (e.get('result') or {}).get('rank')],
+                         key=lambda e: e['result']['rank'])[:3]
+            medal = {1: '🥇', 2: '🥈', 3: '🥉'} if p['round'] == '決勝' else {1: '1位 ', 2: '2位 ', 3: '3位 '}
+            line = '　'.join(f"{medal.get(e['result']['rank'], '')}{e.get('name') or e.get('team')} {e['result'].get('time', '')}"
+                             for e in top)
+            note += f"\n**直近 No.{last} {p['gender']} {p['distance']} {p['stroke']} {p['round']}**" + (("\n" + line) if line else "")
         if len(fin) >= 106:
             note = "🏁 **全106種目 終了**\n記録は速報値です。正式な結果は公式の発表でご確認ください。"
         if d['meta'].get('notice') != note:

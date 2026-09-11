@@ -1420,7 +1420,7 @@ if(LIVE){
       if(typeof j.n === "number" && j.n !== myN) bar.style.display = "block";
     }catch(_){}
   };
-  setInterval(check, 30000);
+  setInterval(check, 20000);
   // アプリに戻ってきた瞬間にも見に行く（30秒待たせない）
   document.addEventListener("visibilitychange", () => { if(!document.hidden) check(); });
 }

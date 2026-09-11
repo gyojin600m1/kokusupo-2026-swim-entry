@@ -1,0 +1,4 @@
+watch/.seen.json
+watch/.halted
+watch/log.txt
+watch/*.log

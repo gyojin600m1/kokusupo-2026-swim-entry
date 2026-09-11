@@ -205,7 +205,7 @@ def parse_start(data, relay):
                     head = txt
                     continue
                 w0 = ws[0]
-                if not (60 <= w0['x0'] < 85):
+                if not (60 <= w0['x0'] < 85 or (w0['text'].startswith('補欠') and w0['x0'] < 85)):
                     continue
                 if relay:
                     nm = ''.join(w['text'] for w in ws if 136 <= w['x0'] < 225)

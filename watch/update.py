@@ -310,7 +310,8 @@ def main():
         pool = d['relays'] if last in is_relay_no else d['entries']
         top = sorted([e for e in pool if last in (e.get('programNos') or []) and (e.get('result') or {}).get('rank')],
                      key=lambda e: e['result']['rank'])[:3]
-        medal = {1: '🥇', 2: '🥈', 3: '🥉'}
+        # メダルは決勝だけ。予選は順位の数字で出す。
+        medal = {1: '🥇', 2: '🥈', 3: '🥉'} if p['round'] == '決勝' else {1: '1位 ', 2: '2位 ', 3: '3位 '}
         line = '　'.join(f"{medal.get(e['result']['rank'], '')}{e.get('name') or e.get('team')} {e['result'].get('time', '')}"
                          for e in top)
         note = (f"🔴 **速報中**　終了 {len(fin)}/106種目\n"

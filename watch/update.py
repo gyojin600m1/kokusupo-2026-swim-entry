@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""第80回国民スポーツ大会 競泳（2026-09-11〜13 青森）速報の見張り。
+"""第80回国民スポーツ大会 競泳（2026-09-11〜13 青森）速報の見張い。
 
-  ・開催県の記録検索システム（kirokukensaku.net/5NS26/）から種目ごとの結果を取り、
-    エントリー確認アプリに反映して公開する。
-  ・予選は 組／コース で本人の行に付ける。決勝は本人の行を増やして付ける。
+  ・SEIKO 競技結果速報 ranking/{日}R{No}.pdf（種目終了の数分後に出る）を本線にする。
+  ・開催県の記録検索システム（kirokukensaku.net/5NS26/・1〜2時間遅れ）は
+    「決勝へ」「新記録」の確認だけに使う（SEIKOの記録・順位は上書きしない）。
+  ・予選は 組／水路 で本人の行に付ける。決勝は本人の行を増やして付ける。リレーは泳者も入れる。
   ・検算に落ちたら公開しない。転載に関する掲示を見つけたら自動的に止まる。
-  ・launchd から1分おきに動く（競技のある時間帯だけ）。
+  ・launchd から1分おきに動く（競技のある時間帯だけ）。Claudeは使わない。
 """
-import json, os, re, subprocess, sys, time, urllib.request, unicodedata
+import json, os, re, subprocess, sys, time, urllib.request, urllib.error, unicodedata, collections, io
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
 APP    = os.path.dirname(HERE)
@@ -19,28 +20,31 @@ BACKUP = os.path.expanduser('~/swim-apps-backup/apps/kokusupo-2026-swim-entry/in
 LOG    = os.path.join(HERE, 'log.txt')
 SEEN   = os.path.join(HERE, '.seen.json')
 HALT   = os.path.join(HERE, '.halted')
+PDFDIR = os.path.join(HERE, '.pdf')
 
 LABEL  = 'com.fukuda.swim.kokusupo2026-results'
-BASE   = 'https://kirokukensaku.net'
-DAYS   = {'2026-09-11': '1日目', '2026-09-12': '2日目', '2026-09-13': '3日目'}
+SEIKO  = 'https://swim.seiko.co.jp/2026/S70703'
+KIROKU = 'https://kirokukensaku.net'
+DAYS   = {'2026-09-11': 1, '2026-09-12': 2, '2026-09-13': 3}
+FINAL_N = 8                                    # 予選→決勝は8名（記録検索の「決勝へ」が8つ）
 STOP_AFTER = '2026-09-13 21:45'
-# 決勝終了 18:15 / 18:18 / 16:12。掲載は種目終了から1〜2時間遅れるので、その分だけ後ろまで。夜中は回さない。
 WINDOW = {'2026-09-11': ('9:00', '21:00'),
           '2026-09-12': ('9:00', '21:00'),
           '2026-09-13': ('9:00', '19:30')}
+RECHECK = 15 * 60                              # 取り込み済みの種目は15分に1回だけ見直す（訂正対応）
 UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/128.0 Safari/537.36')
 NOTICE_WORDS = ['転載', '再配布', '再利用', '大会運営を目的']
+TIME = re.compile(r'^(?:\d+:)?\d{1,2}\.\d{2}$')
+NG = ('棄権', '失格', '途中棄権', '不出場')
 
-# サイトの種別見出し → アプリの (distance の前置き, 性別)
 CAT = {'成年男子': ('成年', '男子'), '成年女子': ('成年', '女子'),
        '少年男子Ａ': ('少年Ａ', '男子'), '少年女子Ａ': ('少年Ａ', '女子'),
        '少年男子Ｂ': ('少年Ｂ', '男子'), '少年女子Ｂ': ('少年Ｂ', '女子'),
        '少年女子': ('少年共通', '女子'), '少年男子': ('少年共通', '男子')}
 IT = str.maketrans({'髙': '高', '﨑': '崎', '栁': '柳', '𠮷': '吉', '濵': '浜', '濱': '浜',
                     '邊': '辺', '邉': '辺', '齋': '斎', '齊': '斉', '國': '国', '槗': '橋',
-                    '𣘺': '橋', '瀨': '瀬', '德': '徳', '黒': '黒', '眞': '真', '澤': '沢',
-                    '廣': '広', '嶋': '島'})
+                    '𣘺': '橋', '瀨': '瀬', '德': '徳', '眞': '真', '澤': '沢', '廣': '広', '嶋': '島'})
 
 
 def log(m):
@@ -66,12 +70,6 @@ def load(p, d):
         return d
 
 
-def get(url, timeout=30):
-    req = urllib.request.Request(url, headers={'User-Agent': UA})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode('utf-8', 'replace')
-
-
 def halted():
     return os.path.exists(HALT)
 
@@ -84,32 +82,41 @@ def halt(reason):
     stop_myself()
 
 
+def get(url, since=None, timeout=30):
+    """(status, body, last-modified)。変更が無ければ (304, None, since)。"""
+    h = {'User-Agent': UA}
+    if since:
+        h['If-Modified-Since'] = since
+    req = urllib.request.Request(url, headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read(), r.headers.get('Last-Modified')
+    except urllib.error.HTTPError as ex:
+        if ex.code == 304:
+            return 304, None, since
+        return ex.code, None, None
+
+
 # ---------- 文字の正規化 ----------
 def nfkc(s):
     return unicodedata.normalize('NFKC', s or '')
 
 
 def nname(s):
-    # 姓名の間の空白と異体字を吸収して比べる
     return re.sub(r'[\s　]+', '', nfkc(s)).translate(IT)
 
 
 def npref(s):
-    # 「青森(青森県競技力向上対策本部)」→「青森」
-    s = nfkc(s).strip()
-    s = re.split(r'[（(]', s)[0].strip()
-    return s
+    return re.split(r'[（(]', nfkc(s).strip())[0].replace(' ', '').strip()
 
 
 def nevent(s):
-    # 「４×１００ｍフリーリレー」「400ｍ自由形」→ ('4×100m', 'フリーリレー') / ('400m','自由形')
-    s = nfkc(s).replace(' ', '').replace('x', '×').replace('X', '×').replace('Ｘ', '×')
+    s = nfkc(s).replace(' ', '').replace('x', '×').replace('X', '×')
     m = re.match(r'^(\d+×\d+m|\d+m)(.+)$', s)
     return (m.group(1), m.group(2)) if m else (None, s)
 
 
 def ntime(s):
-    # 「4分16秒08」→「4:16.08」、「58秒12」→「58.12」
     s = nfkc(s).strip()
     m = re.match(r'^(?:(\d+)分)?(\d+)秒(\d+)$', s)
     if not m:
@@ -122,25 +129,81 @@ def strip(x):
     return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', x)).strip()
 
 
-# ---------- サイトの読み取り ----------
+# ---------- SEIKO 種目別競技結果 PDF ----------
+def parse_seiko(data, relay):
+    """PDF → (見出し, [row])。row = {rank, heat, lane, name/team, pref, time, note, rec, members}"""
+    import pdfplumber
+    head, rows, cur = '', [], None
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        first = pdf.pages[0].extract_text() or ''
+        if 'まだ作成されていません' in first or '実施されません' in first:
+            return None, []
+        for page in pdf.pages:
+            line = collections.defaultdict(list)
+            for w in page.extract_words():
+                line[round(w['top'] / 2)].append(w)
+            for k in sorted(line):
+                ws = sorted(line[k], key=lambda w: w['x0'])
+                txt = ' '.join(w['text'] for w in ws)
+                if txt.startswith('競技No.'):
+                    head = txt
+                    continue
+                hl = [w['text'] for w in ws if 55 <= w['x0'] < 106 and re.fullmatch(r'\d+/\d+', w['text'])]
+                if hl:                                          # 出場者の1行目
+                    rank = [w['text'] for w in ws if w['x0'] < 55 and re.fullmatch(r'\d+', w['text'])]
+                    h, l = hl[0].split('/')
+                    cur = {'heat': int(h), 'lane': int(l), 'rank': int(rank[0]) if rank else None,
+                           'time': None, 'note': None, 'rec': None, 'members': []}
+                    if relay:
+                        cur['pref'] = ''.join(w['text'] for w in ws if 85 <= w['x0'] < 148)
+                        cur['name'] = cur['pref']
+                    else:
+                        cur['pref'] = ''.join(w['text'] for w in ws if 106 <= w['x0'] < 146)
+                        cur['name'] = ''.join(w['text'] for w in ws if 146 <= w['x0'] < 214)
+                    rows.append(cur)
+                if cur is None:
+                    continue
+                if relay and not hl:                             # 泳者の行（泳順 1〜4 が x≈89）
+                    od = [w for w in ws if 80 <= w['x0'] < 100 and re.fullmatch(r'[1-4]', w['text'])]
+                    if od and len(cur['members']) < 4:
+                        nm = ' '.join(w['text'] for w in ws if 100 <= w['x0'] < 186)
+                        if nm:
+                            cur['members'].append(nfkc(nm))
+                for w in ws:
+                    if 430 <= w['x0'] < 527:
+                        if TIME.fullmatch(w['text']) and cur['time'] is None:
+                            cur['time'] = w['text']
+                        elif w['text'] in NG:
+                            cur['note'] = w['text']
+                    if w['x0'] < 60 and w['text'] in NG:
+                        cur['note'] = w['text']
+                    if w['x0'] >= 430 and re.fullmatch(r'\S*新', w['text']):
+                        cur['rec'] = w['text']
+    return head, rows
+
+
+def head_ok(head, p):
+    """「競技No. : 15 女子 4x100m フリーリレー 予選」がアプリの種目と合っているか"""
+    h = nfkc(head).replace(' ', '')
+    m = re.search(r'競技No\.:(\d+)', h)
+    return bool(m) and int(m.group(1)) == p['no'] and p['gender'] in h \
+        and p['stroke'] in h and p['round'] in h
+
+
+# ---------- 記録検索システム（決勝へ・新記録の確認だけ） ----------
 def parse_discipline(html):
-    """種別ごとの表 → [(種別, 開始, 種目, 状況, href)]"""
     out = []
-    parts = re.split(r'<h3 class="result_border_title">', html)
-    for part in parts[1:]:
+    for part in re.split(r'<h3 class="result_border_title">', html)[1:]:
         cat = strip(part.split('</h3>', 1)[0])
         for tr in re.findall(r'<tr[^>]*>(.*?)</tr>', part, re.S):
             cells = [strip(c) for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', tr, re.S)]
             href = re.findall(r'href="(/5NS26/detail_[^"]+)"', tr)
             if len(cells) >= 4 and href:
-                out.append((cat, cells[0], cells[1], cells[3], href[0]))
+                out.append((cat, cells[1], cells[3], href[0]))
     return out
 
 
 def parse_detail(html):
-    """種目ページ → (見出し, [(順位, 組, コース, 名前, 所属, 記録, 備考)])"""
-    title = re.findall(r'<h3[^>]*>([^<]*?(?:予選|決勝)[^<]*)</h3>', html)
-    title = strip(title[0]) if title else ''
     rows = []
     for tr in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.S):
         if 'rl_rank' not in tr or '<th' in tr:
@@ -151,35 +214,44 @@ def parse_detail(html):
         rank, hl, name, team, rec, note = cells[:6]
         m = re.match(r'^(\d+)\s*/\s*(\d+)$', nfkc(hl))
         heat, lane = (int(m.group(1)), int(m.group(2))) if m else (None, None)
-        rank = int(rank) if re.match(r'^\d+$', nfkc(rank)) else None
-        rows.append((rank, heat, lane, name, team, rec, note))
-    return title, rows
+        rows.append((heat, lane, name, team, rec, nfkc(note).strip()))
+    return rows
 
 
-def make_result(rank, rec, note):
-    r = {}
-    t = ntime(rec)
-    if t:
-        r['time'] = t
-    if rank:
-        r['rank'] = rank
-    n = nfkc(note).strip()
-    if re.search(r'棄権|失格|途中|DNS|DSQ|DNF|DQ', n, re.I):
-        r['note'] = n
-        r.pop('rank', None)
-    elif re.search(r'新', n):
-        r['rec'] = n
-    if '決勝へ' in n or n in ('Q', 'q'):
-        r['adv'] = True
-    if not t and not r.get('note') and rec.strip() and not re.match(r'^[-－―—]*$', rec.strip()):
-        r['note'] = nfkc(rec).strip()      # 記録欄に「失格」等が入る形
-    return r
+# ---------- 本人の行に付ける ----------
+def find_row(pool, no, heat, lane, name, pref, relay):
+    ok = [e for e in pool if no in (e.get('programNos') or []) and e.get('heat') == heat and e.get('lane') == lane
+          and ((relay and npref(e.get('team')) == npref(pref))
+               or (not relay and nname(e.get('name')) == nname(name)))]
+    if ok:
+        return ok[0], False
+    ok = [e for e in pool if no in (e.get('programNos') or [])
+          and ((relay and npref(e.get('team')) == npref(pref))
+               or (not relay and nname(e.get('name')) == nname(name) and npref(e.get('team')) == npref(pref)))]
+    return (ok[0], True) if ok else (None, False)
 
 
-# ---------- 本体 ----------
+def final_row(pool, pkey, no, key, name, pref, relay, heat, lane):
+    """決勝の行。予選の行を型にして作る（既にあれば返す）"""
+    pre_no = pkey.get(key[:4] + ('予選',))
+    base = [e for e in pool if pre_no in (e.get('programNos') or [])
+            and ((relay and npref(e.get('team')) == npref(pref))
+                 or (not relay and nname(e.get('name')) == nname(name) and npref(e.get('team')) == npref(pref)))]
+    if not base:
+        return None, False
+    have = [e for e in pool if no in (e.get('programNos') or [])
+            and ((relay and npref(e.get('team')) == npref(pref)) or (not relay and nname(e.get('name')) == nname(name)))]
+    if have:
+        return have[0], False
+    e = {k: v for k, v in base[0].items() if k not in ('result', 'heat', 'lane', 'note', 'members')}
+    e['programNos'] = [no]
+    pool.append(e)
+    return e, True
+
+
 def main():
     now = time.strftime('%Y-%m-%d %H:%M')
-    if now > STOP_AFTER:                       # 停止判定は時間帯ガードより先に置く
+    if now > STOP_AFTER:
         log('大会が終わったので見張りを止めた')
         notify('国スポ競泳', '見張りを終了しました')
         stop_myself()
@@ -199,118 +271,175 @@ def main():
 
     d = json.load(open(SRC, encoding='utf-8'))
     prog = d['program']
-    # (前置き, 性別, 距離, 泳法, ラウンド) → No.
-    pkey = {}
+    pinfo = {p['no']: p for p in prog}
+    pkey, keyof = {}, {}
     for p in prog:
         pre, dist = p['distance'].split(' ', 1)
-        pkey[(pre, p['gender'], dist.replace('ｍ', 'm'), p['stroke'], p['round'])] = p['no']
-    is_relay_no = {p['no'] for p in prog if 'リレー' in p['stroke']}
-    pinfo = {p['no']: p for p in prog}
+        k = (pre, p['gender'], dist.replace('ｍ', 'm'), p['stroke'], p['round'])
+        pkey[k] = p['no']; keyof[p['no']] = k
+    is_relay = {p['no'] for p in prog if 'リレー' in p['stroke']}
+    dayno = {'1日目': 1, '2日目': 2, '3日目': 3}
 
     seen = load(SEEN, {})
-    changed = 0
-    unmatched = []
+    st = seen.setdefault('seiko', {})
+    changed, unmatched, imported = 0, [], []
+    os.makedirs(PDFDIR, exist_ok=True)
+    tnow = time.time()
 
-    for day, dayname in DAYS.items():
+    # ===== 1) SEIKO 本線 =====
+    for p in prog:
+        no, dn = p['no'], dayno.get(p['day'], 1)
+        if dn > DAYS.get(today, 9):
+            continue                                     # まだ来ていない日
+        s = st.setdefault(str(no), {})
+        if dn == DAYS.get(today) and p.get('startTime'):
+            h, m = p['startTime'].split(':')
+            if mins < int(h) * 60 + int(m) and not byhand:
+                continue                                 # まだ泳いでいない
+        if s.get('done') and tnow - s.get('t', 0) < RECHECK and not byhand:
+            continue
+        url = f'{SEIKO}/ranking/{dn:02d}R{no:03d}.pdf'
+        code, data, lm = get(url, s.get('lm'))
+        s['t'] = tnow
+        if code == 304:
+            continue
+        if code != 200 or not data:
+            if code not in (404,):
+                log(f'取得失敗 {url}: HTTP {code}')
+            continue
+        if len(data) < 12000:                             # 「まだ作成されていません」
+            s['lm'] = lm
+            continue
+        relay = no in is_relay
+        try:
+            head, rows = parse_seiko(data, relay)
+        except Exception as ex:
+            log(f'No.{no} PDFを読めない: {repr(ex)[:80]}')
+            continue
+        if head is None:
+            s['lm'] = lm
+            continue
+        if not head_ok(head, p):
+            log(f'No.{no} 見出しが合わない: {head[:60]}')
+            continue
+        with open(os.path.join(PDFDIR, f'{dn:02d}R{no:03d}.pdf'), 'wb') as f:
+            f.write(data)
+        pool = d['relays'] if relay else d['entries']
+        n_ok = 0
+        for r in rows:
+            res = {}
+            if r['time']:
+                res['time'] = r['time']
+            if r['note']:
+                res['note'] = r['note']
+            elif r['rank']:
+                res['rank'] = r['rank']
+                if p['round'] == '予選' and r['rank'] <= FINAL_N:
+                    res['adv'] = True
+            if r['rec']:
+                res['rec'] = r['rec']
+            if p['round'] == '予選':
+                e, moved = find_row(pool, no, r['heat'], r['lane'], r['name'], r['pref'], relay)
+                if e is None:
+                    unmatched.append(f'No.{no} {r["heat"]}/{r["lane"]} {r["name"]} {r["pref"]}')
+                    continue
+                if moved:
+                    e['heat'], e['lane'] = r['heat'], r['lane']
+                    e['note'] = f'第{r["heat"]}組 {r["lane"]}レーン'
+                    changed += 1
+            else:
+                e, made = final_row(pool, pkey, no, keyof[no], r['name'], r['pref'], relay, r['heat'], r['lane'])
+                if e is None:
+                    unmatched.append(f'No.{no}(決勝) {r["name"]} {r["pref"]}')
+                    continue
+                if made:
+                    changed += 1
+                if e.get('lane') != r['lane']:
+                    e['heat'], e['lane'] = r['heat'], r['lane']
+                    e['note'] = f'決勝 {r["lane"]}レーン'
+                    changed += 1
+            old = e.get('result') or {}
+            new = dict(old)
+            new.update(res)
+            for k in ('rank', 'adv'):
+                if k in old and k not in res:
+                    new.pop(k, None)                      # 失格に変わった等
+            if new != old:
+                e['result'] = new
+                changed += 1
+            if relay and r['members'] and e.get('members') != r['members']:
+                e['members'] = r['members']
+                changed += 1
+            n_ok += 1
+        s['lm'] = lm
+        s['done'] = n_ok > 0
+        imported.append(no)
+        log(f'No.{no} {p["gender"]} {p["distance"]} {p["stroke"]} {p["round"]}: {n_ok}/{len(rows)}件（SEIKO）')
+
+    # ===== 2) 記録検索システム：決勝へ・新記録・棄権の確認（記録と順位は上書きしない）=====
+    kr = seen.setdefault('kiroku', {})
+    for day, dn in DAYS.items():
         if day > today:
             continue
-        url = f'{BASE}/5NS26/discipline_020_{day.replace("-", "")}.html'
-        try:
-            html = get(url)
-        except Exception as ex:
-            log(f'取得失敗 {url}: {repr(ex)[:80]}')
+        code, body, _ = get(f'{KIROKU}/5NS26/discipline_020_{day.replace("-", "")}.html')
+        if code != 200 or not body:
             continue
+        html = body.decode('utf-8', 'replace')
         if any(w in html for w in NOTICE_WORDS):
             halt('記録検索システムに転載に関する掲示が出た')
             return
-        for cat, t0, ev, status, href in parse_discipline(html):
-            if '終了' not in status:
-                continue
-            if cat not in CAT:
-                unmatched.append(f'種別不明 {cat} {ev}')
+        for cat, ev, status, href in parse_discipline(html):
+            if '終了' not in status or cat not in CAT:
                 continue
             pre, gen = CAT[cat]
             dist, stroke = nevent(re.sub(r'\s*(予選|決勝)\s*$', '', ev))
             rnd = '決勝' if '決勝' in ev else '予選'
             no = pkey.get((pre, gen, dist, stroke, rnd))
             if no is None:
-                unmatched.append(f'種目不明 {cat} {ev} → {(pre, gen, dist, stroke, rnd)}')
                 continue
-            try:
-                dhtml = get(BASE + href)
-            except Exception as ex:
-                log(f'取得失敗 {href}: {repr(ex)[:80]}')
+            code, body, _ = get(KIROKU + href)
+            if code != 200 or not body:
                 continue
-            sig = str(len(dhtml)) + '|' + str(dhtml.count('rl_rank'))
-            if seen.get(href) == sig and not byhand:
-                continue                              # 前回と同じ内容
-            title, rows = parse_detail(dhtml)
-            if not rows:
+            dhtml = body.decode('utf-8', 'replace')
+            sig = f'{len(dhtml)}|{dhtml.count("rl_rank")}'
+            if kr.get(href) == sig and not byhand:
                 continue
-            relay = no in is_relay_no
+            relay = no in is_relay
             pool = d['relays'] if relay else d['entries']
-            n_ok = 0
-            for rank, heat, lane, name, team, rec, note in rows:
-                pref = npref(team if relay else team)
-                res = make_result(rank, rec, note)
-                if rnd == '予選':
-                    cand = [e for e in pool if no in (e.get('programNos') or [])
-                            and e.get('heat') == heat and e.get('lane') == lane]
-                    ok = [e for e in cand if (relay and npref(e.get('team')) == pref)
-                          or (not relay and nname(e.get('name')) == nname(name))]
-                    if not ok:                        # 組・コースで違えば名前（都道府県）で探す
-                        ok = [e for e in pool if no in (e.get('programNos') or [])
-                              and ((relay and npref(e.get('team')) == pref)
-                                   or (not relay and nname(e.get('name')) == nname(name)
-                                       and npref(e.get('team')) == pref))]
-                        if ok and heat and lane:
-                            ok[0]['heat'], ok[0]['lane'] = heat, lane
-                            ok[0]['note'] = f'第{heat}組 {lane}レーン'
-                    if not ok:
-                        unmatched.append(f'No.{no} {heat}/{lane} {name} {team}')
-                        continue
-                    e = ok[0]
-                else:  # 決勝: 予選の行を型にして決勝の行を作る（既にあれば更新）
-                    pre_no = pkey.get((pre, gen, dist, stroke, '予選'))
-                    base = [e for e in pool if pre_no in (e.get('programNos') or [])
-                            and ((relay and npref(e.get('team')) == pref)
-                                 or (not relay and nname(e.get('name')) == nname(name)
-                                     and npref(e.get('team')) == pref))]
-                    if not base:
-                        unmatched.append(f'No.{no}(決勝) {name} {team}')
-                        continue
-                    have = [e for e in pool if no in (e.get('programNos') or [])
-                            and ((relay and npref(e.get('team')) == pref)
-                                 or (not relay and nname(e.get('name')) == nname(name)))]
-                    if have:
-                        e = have[0]
-                    else:
-                        e = {k: v for k, v in base[0].items() if k not in ('result', 'heat', 'lane', 'note')}
-                        e['programNos'] = [no]
-                        pool.append(e)
-                        changed += 1
-                    if heat and lane:
-                        e['heat'], e['lane'] = heat, lane
-                        e['note'] = f'決勝 {lane}レーン'
-                if e.get('result') != res:
+            for heat, lane, name, team, rec, note in parse_detail(dhtml):
+                cand = [e for e in pool if no in (e.get('programNos') or [])
+                        and ((relay and npref(e.get('team')) == npref(team))
+                             or (not relay and nname(e.get('name')) == nname(name)))]
+                if not cand:
+                    continue
+                e = cand[0]
+                res = dict(e.get('result') or {})
+                if e.get('result') is None and ntime(rec):        # SEIKOがまだなら記録も入れる
+                    res['time'] = ntime(rec)
+                adv = ('決勝へ' in note)
+                if rnd == '予選' and res.get('adv', False) != adv and 'rank' in res:
+                    res['adv'] = adv
+                if re.search(r'新', note) and not res.get('rec'):
+                    res['rec'] = note
+                if re.search(r'棄権|失格|途中', note) and not res.get('note'):
+                    res['note'] = note
+                    res.pop('rank', None); res.pop('adv', None)
+                if res and res != (e.get('result') or {}):
                     e['result'] = res
                     changed += 1
-                n_ok += 1
-            seen[href] = sig
-            log(f'No.{no} {cat} {ev}: {n_ok}/{len(rows)}件')
+            kr[href] = sig
 
     if unmatched:
         log('  未突合: ' + ' / '.join(unmatched[:8]) + (' …' if len(unmatched) > 8 else ''))
 
-    # --- 速報のまとめを選手タブの先頭に出す（時計は入れない） ---
+    # ===== 3) 速報のまとめ（時計は入れない）=====
     fin = sorted({n for e in d['entries'] + d['relays'] if e.get('result') for n in (e.get('programNos') or [])})
     if fin:
         last = fin[-1]
         p = pinfo[last]
-        pool = d['relays'] if last in is_relay_no else d['entries']
+        pool = d['relays'] if last in is_relay else d['entries']
         top = sorted([e for e in pool if last in (e.get('programNos') or []) and (e.get('result') or {}).get('rank')],
                      key=lambda e: e['result']['rank'])[:3]
-        # メダルは決勝だけ。予選は順位の数字で出す。
         medal = {1: '🥇', 2: '🥈', 3: '🥉'} if p['round'] == '決勝' else {1: '1位 ', 2: '2位 ', 3: '3位 '}
         line = '　'.join(f"{medal.get(e['result']['rank'], '')}{e.get('name') or e.get('team')} {e['result'].get('time', '')}"
                          for e in top)
@@ -318,7 +447,7 @@ def main():
                 f"**直近 No.{last} {p['gender']} {p['distance']} {p['stroke']} {p['round']}**"
                 + (("\n" + line) if line else ""))
         if len(fin) >= 106:
-            note = f"🏁 **全106種目 終了**\n記録は速報値です。正式な結果は公式の発表でご確認ください。"
+            note = "🏁 **全106種目 終了**\n記録は速報値です。正式な結果は公式の発表でご確認ください。"
         if d['meta'].get('notice') != note:
             d['meta']['notice'] = note
             changed += 1
@@ -328,13 +457,11 @@ def main():
         return
 
     json.dump(d, open(SRC, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
-
     b = subprocess.run([sys.executable, BUILD, SRC], capture_output=True, text=True)
     if b.returncode != 0 or '✗' in b.stdout:
         log('  ⚠ ビルドの検算に落ちた: ' + (b.stdout or b.stderr)[-200:])
         notify('国スポ競泳 要確認', 'ビルドの検算に落ちたので公開していません')
         return
-
     subprocess.run(['cp', OUT, os.path.join(APP, 'index.html')], check=False)
     subprocess.run(['cp', OUT, BACKUP], check=False)
     n_res = sum(1 for e in d['entries'] if e.get('result')) + sum(1 for r in d['relays'] if r.get('result'))

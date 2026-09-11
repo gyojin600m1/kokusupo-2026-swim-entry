@@ -1,4 +1,5 @@
 watch/.seen.json
 watch/.halted
+watch/.pdf/
 watch/log.txt
 watch/*.log

@@ -1,7 +1,7 @@
 #!/bin/zsh
 cd "$(dirname "$0")"
 echo "=== 国スポ2026 競泳 速報の見張り ==="
-launchctl print "gui/$(id -u)/com.fukuda.swim.kokusupo2026-results" >/dev/null 2>&1 && echo "見張り: 動いています（3分おき）" || echo "見張り: 止まっています"
+launchctl print "gui/$(id -u)/com.fukuda.swim.kokusupo2026-results" >/dev/null 2>&1 && echo "見張り: 動いています（1分おき）" || echo "見張り: 止まっています"
 [ -f .halted ] && echo "⚠ 停止中: $(cat .halted)"
 echo
 echo "--- いま取りに行く ---"

@@ -85,7 +85,8 @@ def main():
             if key != last_key:
                 log(f"いま No.{cur['no']} {cur['gender']} {cur['event']} {cur['round']} 第{cur['heat']}組")
                 last_key = key
-            timed = {l: v for l, v in cur['lanes'].items() if v['tm']}
+            # 泳いでいる最中は tm にラップが入る。ゴールして順位(r)が付いたレーンだけを採る。
+            timed = {l: v for l, v in cur['lanes'].items() if v['r']}
             if timed:
                 try:
                     store = json.load(open(STORE, encoding='utf-8'))

@@ -1412,14 +1412,17 @@ if(LIVE){
     + "font-weight:700;font-size:15px;box-shadow:0 6px 18px rgba(0,0,0,.45);cursor:pointer";
   bar.onclick = () => location.replace(location.pathname + "?t=" + Date.now());
   document.body.appendChild(bar);
-  setInterval(async () => {
+  const check = async () => {
     try{
       const r = await fetch("live.json?t=" + Date.now(), {cache:"no-store"});
       if(!r.ok) return;
       const j = await r.json();
       if(typeof j.n === "number" && j.n !== myN) bar.style.display = "block";
     }catch(_){}
-  }, 60000);
+  };
+  setInterval(check, 30000);
+  // アプリに戻ってきた瞬間にも見に行く（30秒待たせない）
+  document.addEventListener("visibilitychange", () => { if(!document.hidden) check(); });
 }
 </script>
 </body>

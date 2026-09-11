@@ -186,6 +186,42 @@ def parse_seiko(data, relay):
     return head, rows
 
 
+def parse_start(data, relay):
+    """決勝スタートリスト PDF → (見出し, [row], [補欠])。row = {lane, pref, name}"""
+    import pdfplumber
+    head, rows, subs = '', [], []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        first = pdf.pages[0].extract_text() or ''
+        if 'まだ作成されていません' in first or '実施されません' in first:
+            return None, [], []
+        for page in pdf.pages:
+            line = collections.defaultdict(list)
+            for w in page.extract_words():
+                line[round(w['top'] / 2)].append(w)
+            for k in sorted(line):
+                ws = sorted(line[k], key=lambda w: w['x0'])
+                txt = ' '.join(w['text'] for w in ws)
+                if txt.startswith('競技No.'):
+                    head = txt
+                    continue
+                w0 = ws[0]
+                if not (60 <= w0['x0'] < 85):
+                    continue
+                if relay:
+                    nm = ''.join(w['text'] for w in ws if 136 <= w['x0'] < 225)
+                    pref = nm
+                else:
+                    pref = ''.join(w['text'] for w in ws if 85 <= w['x0'] < 140)
+                    nm = ''.join(w['text'] for w in ws if 185 <= w['x0'] < 273)
+                if not nm:
+                    continue                                   # 空きレーン
+                if re.fullmatch(r'\d', w0['text']):
+                    rows.append({'lane': int(w0['text']), 'pref': pref, 'name': nm})
+                elif w0['text'].startswith('補欠'):
+                    subs.append({'pref': pref, 'name': nm})
+    return head, rows, subs
+
+
 def head_ok(head, p):
     """「競技No. : 15 女子 4x100m フリーリレー 予選」がアプリの種目と合っているか"""
     h = nfkc(head).replace(' ', '')
@@ -296,6 +332,65 @@ def main():
     changed, unmatched, imported = 0, [], []
     os.makedirs(PDFDIR, exist_ok=True)
     tnow = time.time()
+
+    # ===== 0) 決勝のスタートリスト（予選が終わった種目だけ）=====
+    sl = seen.setdefault('start', {})
+    for p in prog:
+        no, dn = p['no'], dayno.get(p['day'], 1)
+        if p['round'] != '決勝' or dn > DAYS.get(today, 9):
+            continue
+        pre_no = pkey.get(keyof[no][:4] + ('予選',))
+        if not st.get(str(pre_no), {}).get('done') and not byhand:
+            continue                                     # 予選の結果がまだ
+        s = sl.setdefault(str(no), {})
+        if s.get('done') and tnow - s.get('t', 0) < RECHECK and not byhand:
+            continue
+        url = f'{SEIKO}/start/{dn:02d}S{no:03d}.pdf'
+        code, data, lm = get(url, None if byhand else s.get('lm'))
+        s['t'] = tnow
+        if code == 304:
+            continue
+        if code != 200 or not data or len(data) < 12000:
+            s['lm'] = lm
+            continue
+        relay = no in is_relay
+        try:
+            head, rows, subs = parse_start(data, relay)
+        except Exception as ex:
+            log(f'No.{no} スタートリストを読めない: {repr(ex)[:80]}')
+            continue
+        if head is None:
+            s['lm'] = lm
+            continue
+        if not head_ok(head, p):
+            log(f'No.{no} スタートリストの見出しが合わない: {head[:60]}')
+            continue
+        pool = d['relays'] if relay else d['entries']
+        n_ok = 0
+        for r in rows:
+            e, made = final_row(pool, pkey, no, keyof[no], r['name'], r['pref'], relay, 1, r['lane'])
+            if e is None:
+                unmatched.append(f'No.{no}(決勝SL) {r["name"]} {r["pref"]}')
+                continue
+            if made or e.get('lane') != r['lane'] or e.get('heat') != 1:
+                e['heat'], e['lane'] = 1, r['lane']
+                e['note'] = f'決勝 {r["lane"]}レーン'
+                changed += 1
+            n_ok += 1
+        # 補欠は予選の行に印を付ける（決勝の行は作らない＝組・レーン表を崩さない）
+        for e in pool:
+            if pre_no in (e.get('programNos') or []) and (e.get('result') or {}).get('adv') == '決勝 補欠':
+                e['result'].pop('adv', None); changed += 1
+        for r in subs:
+            base = [e for e in pool if pre_no in (e.get('programNos') or [])
+                    and ((relay and npref(e.get('team')) == npref(r['pref']))
+                         or (not relay and nname(e.get('name')) == nname(r['name'])))]
+            if base:
+                base[0].setdefault('result', {})['adv'] = '決勝 補欠'
+                changed += 1
+        s['lm'] = lm
+        s['done'] = n_ok > 0
+        log(f'No.{no} {p["gender"]} {p["distance"]} {p["stroke"]} 決勝のスタートリスト: {n_ok}/{len(rows)}件' + (f'・補欠{len(subs)}' if subs else ''))
 
     # ===== 1) SEIKO 本線 =====
     for p in prog:

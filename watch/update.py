@@ -39,12 +39,16 @@ TIME = re.compile(r'^(?:\d+:)?\d{1,2}\.\d{2}$')
 NG = ('棄権', '失格', '途中棄権', '不出場')
 
 CAT = {'成年男子': ('成年', '男子'), '成年女子': ('成年', '女子'),
-       '少年男子Ａ': ('少年Ａ', '男子'), '少年女子Ａ': ('少年Ａ', '女子'),
-       '少年男子Ｂ': ('少年Ｂ', '男子'), '少年女子Ｂ': ('少年Ｂ', '女子'),
-       '少年女子': ('少年共通', '女子'), '少年男子': ('少年共通', '男子')}
+       '少年男子A': ('少年Ａ', '男子'), '少年女子A': ('少年Ａ', '女子'),
+       '少年男子B': ('少年Ｂ', '男子'), '少年女子B': ('少年Ｂ', '女子'),
+       '少年女子': ('少年共通', '女子'), '少年男子': ('少年共通', '男子')}   # 見出しはNFKCしてから引く
 IT = str.maketrans({'髙': '高', '﨑': '崎', '栁': '柳', '𠮷': '吉', '濵': '浜', '濱': '浜',
                     '邊': '辺', '邉': '辺', '齋': '斎', '齊': '斉', '國': '国', '槗': '橋',
-                    '𣘺': '橋', '瀨': '瀬', '德': '徳', '眞': '真', '澤': '沢', '廣': '広', '嶋': '島'})
+                    '𣘺': '橋', '瀨': '瀬', '德': '徳', '眞': '真', '澤': '沢', '廣': '広', '嶋': '島',
+                    '桒': '桑', '靑': '青', '曾': '曽', '寳': '宝', '壽': '寿', '惠': '恵', '榮': '栄',
+                    '龍': '竜', '澁': '渋', '舘': '館', '冨': '富', '峯': '峰', '條': '条', '萬': '万',
+                    '內': '内', '淸': '清', '祐': '祐', '﨑': '崎', '嵜': '崎', '瀧': '滝', '櫻': '桜',
+                    '眞': '真', '晄': '晃', '皓': '皓', '琉': '琉', '愼': '慎', '禮': '礼', '龝': '秋'})
 
 
 def log(m):
@@ -228,7 +232,14 @@ def find_row(pool, no, heat, lane, name, pref, relay):
     ok = [e for e in pool if no in (e.get('programNos') or [])
           and ((relay and npref(e.get('team')) == npref(pref))
                or (not relay and nname(e.get('name')) == nname(name) and npref(e.get('team')) == npref(pref)))]
-    return (ok[0], True) if ok else (None, False)
+    if ok:
+        return ok[0], True
+    ok = [e for e in pool if no in (e.get('programNos') or []) and e.get('heat') == heat and e.get('lane') == lane
+          and npref(e.get('team')) == npref(pref)]
+    if ok:
+        log(f'  名前違い（組・水路と県で確定）No.{no} {heat}/{lane} PDF「{name}」/ 名簿「{ok[0].get("name")}」')
+        return ok[0], False
+    return None, False
 
 
 def final_row(pool, pkey, no, key, name, pref, relay, heat, lane):
@@ -299,7 +310,7 @@ def main():
         if s.get('done') and tnow - s.get('t', 0) < RECHECK and not byhand:
             continue
         url = f'{SEIKO}/ranking/{dn:02d}R{no:03d}.pdf'
-        code, data, lm = get(url, s.get('lm'))
+        code, data, lm = get(url, None if byhand else s.get('lm'))   # 手動のときは必ず取り直す
         s['t'] = tnow
         if code == 304:
             continue
@@ -389,6 +400,7 @@ def main():
             halt('記録検索システムに転載に関する掲示が出た')
             return
         for cat, ev, status, href in parse_discipline(html):
+            cat = nfkc(cat).replace(' ', '')
             if '終了' not in status or cat not in CAT:
                 continue
             pre, gen = CAT[cat]

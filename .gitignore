@@ -6,3 +6,4 @@ watch/live_log.txt
 watch/live_heats.json
 watch/*.tmp
 watch/*.log
+watch/.lock

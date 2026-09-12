@@ -811,6 +811,13 @@ def main():
 
 
 if __name__ == '__main__':
+    # 1分おきの起動と手動の --now が重なると、後から書いた方が先の変更を消す。同時に2つ動かさない。
+    import fcntl
+    _lock = open(os.path.join(HERE, '.lock'), 'w')
+    try:
+        fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit(0)
     try:
         main()
     except Exception as ex:

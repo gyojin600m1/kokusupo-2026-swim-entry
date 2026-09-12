@@ -690,7 +690,7 @@ if(OG && OG.nm) TABS.find(t => t.id === "og").nm = OG.nm;
 if(OG && OG.em) TABS.find(t => t.id === "og").em = OG.em;
 if(OG && OG.accent) TABS.find(t => t.id === "og").hot = true;   // 色で目立たせる
 
-const ST = {tab:"sw", ptG:0, pt:false, q:"", gender:"all", hl:false, ev:0, day:"all", pgNo:null, raceKey:null, dpKey:null, open:new Set()};
+const ST = {tab:"sw", ptG:0, pt:false, q:"", gender:"all", hl:false, hlDay:"all", ev:0, day:"all", pgNo:null, raceKey:null, dpKey:null, open:new Set()};
 
 const LIVE = ENTRIES.some(e => e.result) || RELAYS.some(r => r.result);
 document.getElementById("hdT").innerHTML = esc(META.title)
@@ -886,7 +886,32 @@ function viewSw(){
   if(ST.gender !== "all") list = list.filter(s => (ST.gender==="f") === isF(s.gender));
   if(q) list = list.filter(s => s._n.includes(q) || s._t.includes(q) || (qk && s._k.includes(qk)));
 
-  const body = !ST.q && ST.gender==="all" && !ST.hl
+  // ⭐のチームを日ごとに追う一覧（当日「うちの県は今日だれが何時に泳ぐか」を一目で）
+  const days = [...new Set(PROGRAM.map(p=>p.day).filter(Boolean))];
+  const hlSeg = (ST.hl && days.length > 1)
+    ? `<div class="seg"><button data-hd="all" class="${ST.hlDay==="all"?"on":""}">名簿</button>` +
+      days.map(d=>`<button data-hd="${esc(d)}" class="${ST.hlDay===d?"on":""}">${esc(d)}</button>`).join("") + `</div>`
+    : "";
+  const hlTimeline = () => {
+    const rows = [];
+    for(const e of ENTRIES) if(isHL(e.team) && e.entryType !== "リレーのみ") rows.push(e);
+    for(const r of RELAYS)  if(isHL(r.team)) rows.push(Object.assign({}, r, {name:r.team + " リレー", isRelay:true}));
+    const dayRows = rows.filter(x => (PG_BY_NO.get(x.programNos?.[0])||{}).day === ST.hlDay
+                                  && (ST.gender==="all" || (ST.gender==="f") === isF(x.gender)))
+      .sort((a,b)=> (a.programNos[0]-b.programNos[0]) || ((a.heat||0)-(b.heat||0)) || ((a.lane||0)-(b.lane||0)));
+    if(!dayRows.length) return `<div class="empty"><span class="e">🫧</span>${esc(ST.hlDay)}に${esc(META.highlightLabel||"注目")}の出場はありません</div>`;
+    return `<div class="count">⭐ ${esc(META.highlightLabel||"注目")}・${esc(ST.hlDay)}・<b>${dayRows.length}</b>レース（時間順）</div>` +
+      dayRows.map(x => { const p = PG_BY_NO.get(x.programNos[0]) || {};
+        return `<div class="sw ${gcls(x.gender)} hl" data-jn="${x.programNos[0]}" style="cursor:pointer">
+          <div class="sw-r1"><span class="sw-nm">${esc(x.name)}</span>
+            ${x.result ? `<span class="tm">${resPill(x)}</span>` : `<span class="sw-bd" style="color:var(--gold)">${esc(p.startTime||"")}</span>`}</div>
+          <div class="sw-r2"><span class="sw-tm">No.${x.programNos[0]} ${esc((p.distance||"")+" "+(p.stroke||""))} ${esc(p.round||"")}</span>
+            ${x.note?`<span class="pill">${esc(x.note)}</span>`:""}${x.result&&p.startTime?`<span class="pill">${esc(p.startTime)}</span>`:""}
+            <span class="pill ${gcls(x.gender)}">${isF(x.gender)?"女子":"男子"}</span></div>${memLine(x)}</div>`; }).join("");
+  };
+  const body = (ST.hl && ST.hlDay !== "all")
+    ? hlTimeline()
+    : !ST.q && ST.gender==="all" && !ST.hl
     ? `<div class="empty"><span class="e">🔍</span>選手名（ひらがなでも可）や<br>チーム名を入れてください<br>下のチップをタップしても出ます</div>`
     : list.length
       ? `<div class="count"><b>${list.length}</b>名が該当</div>` +
@@ -907,6 +932,7 @@ function viewSw(){
       <button id="qc">クリア</button>
     </div>
     <div class="chips">${HLSET.size?`<button class="hl${ST.hl?" on":""}" data-hl="1">⭐ ${esc(META.highlightLabel||"注目")} ${SWL.filter(s=>isMk(s)).length}名</button>`:""}${TEAMS.map(t=>`<button data-tm="${esc(t[0])}">${esc(t[0])} ${t[1]}</button>`).join("")}</div>
+    ${hlSeg}
     ${body}`;
 }
 
@@ -1331,7 +1357,8 @@ function bind(){
   }
   M.querySelectorAll("[data-g]").forEach(b => b.onclick = () => { ST.gender = b.dataset.g; render(); });
   M.querySelectorAll("[data-tm]").forEach(b => b.onclick = () => { ST.q = b.dataset.tm; ST.hl = false; render(); });
-  M.querySelectorAll("[data-hl]").forEach(b => b.onclick = () => { ST.hl = !ST.hl; ST.q = ""; render(); });
+  M.querySelectorAll("[data-hl]").forEach(b => b.onclick = () => { ST.hl = !ST.hl; ST.q = ""; if(!ST.hl) ST.hlDay = "all"; render(); });
+  M.querySelectorAll("[data-hd]").forEach(b => b.onclick = () => { ST.hlDay = b.dataset.hd; render(); });
   M.querySelectorAll("[data-d]").forEach(b => b.onclick = () => { ST.day = b.dataset.d; render(); });
   M.querySelectorAll("[data-no]").forEach(b => b.onclick = () => { ST.pgNo = +b.dataset.no; render(); });
   M.querySelectorAll(".sw[data-k]").forEach(c => c.onclick = () => {

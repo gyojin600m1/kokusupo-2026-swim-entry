@@ -222,6 +222,47 @@ def parse_start(data, relay):
     return head, rows, subs
 
 
+def parse_relay_start(data):
+    """リレーのスタートリスト PDF → (見出し, [row])。row = {heat, lane, team, members:[(name, grade)]}"""
+    import pdfplumber
+    head, rows, cur, heat = '', [], None, 1
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        first = pdf.pages[0].extract_text() or ''
+        if 'まだ作成されていません' in first or '実施されません' in first:
+            return None, []
+        for page in pdf.pages:
+            line = collections.defaultdict(list)
+            for w in page.extract_words():
+                line[round(w['top'] / 2)].append(w)
+            for k in sorted(line):
+                ws = sorted(line[k], key=lambda w: w['x0'])
+                txt = ' '.join(w['text'] for w in ws)
+                if txt.startswith('競技No.'):
+                    head = txt
+                    continue
+                m = re.fullmatch(r'(\d+)組', ws[0]['text'])
+                if m and ws[0]['x0'] < 60:
+                    heat = int(m.group(1))
+                    continue
+                w0 = ws[0]
+                if 60 <= w0['x0'] < 85 and re.fullmatch(r'\d', w0['text']):
+                    team = ''.join(w['text'] for w in ws if 136 <= w['x0'] < 225)
+                    if not team:
+                        cur = None
+                        continue                               # 空きレーン
+                    cur = {'heat': heat, 'lane': int(w0['text']), 'team': team, 'members': []}
+                    rows.append(cur)
+                if cur is None or w0['x0'] < 60 and w0['text'].startswith('補欠'):
+                    cur = None if w0['text'].startswith('補欠') else cur
+                    continue
+                if any(268 <= w['x0'] < 292 and re.fullmatch(r'\d{1,4}', w['text']) for w in ws):
+                    nm = ' '.join(w['text'] for w in ws if 292 <= w['x0'] < 370)
+                    gr = ''.join(w['text'] for w in ws if 460 <= w['x0'] < 490)
+                    if nm and len(cur['members']) < 4:
+                        cur['members'].append((nfkc(nm), gr))
+    return head, rows
+
+
 def head_ok(head, p):
     """「競技No. : 15 女子 4x100m フリーリレー 予選」がアプリの種目と合っているか"""
     h = nfkc(head).replace(' ', '')
@@ -332,6 +373,79 @@ def main():
     changed, unmatched, imported = 0, [], []
     os.makedirs(PDFDIR, exist_ok=True)
     tnow = time.time()
+
+    # ===== -1) リレーのスタートリスト：泳者4名を先に入れ、個人種目の無い選手を名簿に足す =====
+    rs = seen.setdefault('rstart', {})
+    names_by_pref = {}
+    for e in d['entries']:
+        names_by_pref.setdefault(npref(e.get('team')), set()).add(nname(e.get('name')))
+    for p in prog:
+        no, dn = p['no'], dayno.get(p['day'], 1)
+        if no not in is_relay or dn > DAYS.get(today, 9):
+            continue
+        if p['round'] == '決勝' and not st.get(str(pkey.get(keyof[no][:4] + ('予選',))), {}).get('done') and not byhand:
+            continue
+        s = rs.setdefault(str(no), {})
+        if s.get('done') and tnow - s.get('t', 0) < RECHECK and not byhand:
+            continue
+        url = f'{SEIKO}/start/{dn:02d}S{no:03d}.pdf'
+        code, data, lm = get(url, None if byhand else s.get('lm'))
+        s['t'] = tnow
+        if code == 304:
+            continue
+        if code != 200 or not data or len(data) < 12000:
+            s['lm'] = lm
+            continue
+        try:
+            head, rows = parse_relay_start(data)
+        except Exception as ex:
+            log(f'No.{no} リレーのスタートリストを読めない: {repr(ex)[:80]}')
+            continue
+        if head is None:
+            s['lm'] = lm
+            continue
+        if not head_ok(head, p):
+            log(f'No.{no} リレーのスタートリストの見出しが合わない: {head[:60]}')
+            continue
+        pool = d['relays']
+        cat = p['distance'].split(' ', 1)[0]
+        n_ok, n_new = 0, 0
+        for r in rows:
+            if p['round'] == '予選':
+                e, _ = find_row(pool, no, r['heat'], r['lane'], r['team'], r['team'], True)
+            else:
+                e, made = final_row(pool, pkey, no, keyof[no], r['team'], r['team'], True, r['heat'], r['lane'])
+                if e is not None and (made or e.get('lane') != r['lane']):
+                    e['heat'], e['lane'] = r['heat'], r['lane']
+                    e['note'] = f'決勝 {r["lane"]}レーン'
+                    changed += 1
+            if e is None:
+                unmatched.append(f'No.{no}(リレーSL) {r["team"]}')
+                continue
+            mem = [n for n, g in r['members']]
+            if mem and not e.get('result') and e.get('members') != mem:
+                e['members'] = mem                       # 結果が出るまでは申告の泳順
+                changed += 1
+            pref = npref(r['team'])
+            have = names_by_pref.setdefault(pref, set())
+            for n, g in r['members']:
+                if nname(n) in have:
+                    continue
+                d['entries'].append({'name': n, 'team': pref, 'gender': p['gender'], 'grade': cat,
+                                     'entryType': 'リレーのみ', 'programNos': []})
+                d['swimmers'].append({'name': n, 'team': pref, 'gender': p['gender'], 'grade': cat})
+                have.add(nname(n))
+                n_new += 1
+            n_ok += 1
+        if n_new:
+            c = d['summary']['counts']
+            c['swimmers'] = len(d['swimmers'])
+            c['relayOnlySwimmers'] = sum(1 for e in d['entries'] if e.get('entryType') == 'リレーのみ')
+            changed += 1
+        s['lm'] = lm
+        s['done'] = n_ok > 0
+        log(f'No.{no} {p["gender"]} {p["distance"]} {p["stroke"]} {p["round"]} のスタートリスト: {n_ok}/{len(rows)}チーム'
+            + (f'・リレーのみの選手 {n_new}名を名簿に追加' if n_new else ''))
 
     # ===== 0) 決勝のスタートリスト（予選が終わった種目だけ）=====
     sl = seen.setdefault('start', {})

@@ -968,7 +968,14 @@ function viewPg(){
       ? `<div class="note">このレースは <b>${esc(rc.classes.join("・"))}</b>が<b>一緒に泳ぎます</b>${rc.nos.length>1?`（No.${rc.nos.join("・")}）`:""}。
           順位・賞状は<b>学年区分ごと</b>なので、同じ組の着順とは一致しません。</div>`
       : "";
+    // 前後の種目へ一覧に戻らず移れるように（当日は次々に追いかけるので）。上下に同じボタンを置く
+    const idx = PROGRAM.findIndex(x => x.no === ST.pgNo);
+    const pv = PROGRAM[idx - 1], nx = PROGRAM[idx + 1];
+    const nb = (x, id, lab) => x ? `<button class="tab pgnav" data-go="${id}" style="min-height:48px;flex:1;background:var(--card2);border-radius:11px;border:1px solid var(--border);color:var(--accent)">${lab}</button>`
+                               : `<span style="flex:1"></span>`;
+    const nav = `<div style="display:flex;gap:8px;margin:0 0 10px">${nb(pv,-1,`← No.${pv&&pv.no}`)}${nb(nx,1,`No.${nx&&nx.no} →`)}</div>`;
     return `<button class="tab" id="back" style="min-height:48px;width:100%;background:var(--card2);border-radius:11px;border:1px solid var(--border);color:var(--accent);margin-bottom:10px">← プログラム一覧へ戻る</button>
+      ${nav}
       ${pgHead(p)}
       ${together}
       ${META.lanePrediction ? `<button class="tab" id="toLn" style="min-height:48px;width:100%;background:var(--card2);border-radius:11px;border:1px solid var(--border);color:var(--accent);margin-bottom:10px">🏁 この種目の組・レーンを見る</button>` : ""}
@@ -985,7 +992,8 @@ function viewPg(){
           ${e.result&&e.result.rank?`<span class="pill rk${e.result.rank===1&&isFinalA(e)?" m1":""}">${medalOf(e)}${e.result.rank}位</span>${ovPill(e)}${advPill(e)}`:""}
           ${e.result&&e.time?`<span class="pill ent">申込 ${esc(e.time)}</span>`:""}
           
-          ${tags(e)}</div>${memLine(e)}</div>`).join("")}`;
+          ${tags(e)}</div>${memLine(e)}</div>`).join("")}
+      <div style="height:12px"></div>${nav}`;
   }
 
   const cnt = no => ENTRIES.filter(e => (e.programNos||[]).includes(no)).length
@@ -1345,6 +1353,10 @@ function bind(){
     if(r){ ST.raceKey = r.key; ST.tab = "ln"; render(); }
   });
   const back = M.querySelector("#back"); if(back) back.onclick = () => { ST.pgNo = null; render(); };
+  M.querySelectorAll(".pgnav").forEach(b => b.onclick = () => {
+    const i = PROGRAM.findIndex(x => x.no === ST.pgNo); const p = PROGRAM[i + (+b.dataset.go)];
+    if(p){ ST.pgNo = p.no; ST.day = "all"; render(); window.scrollTo(0, 0); }
+  });
   const toLn = M.querySelector("#toLn"); if(toLn) toLn.onclick = () => {
     const r = RACE_BY_NO.get(ST.pgNo); ST.raceKey = r ? r.key : null; ST.tab = "ln"; render(); };
   const es = M.querySelector("#evSel"); if(es) es.onchange = () => { ST.ev = +es.value; render(); };

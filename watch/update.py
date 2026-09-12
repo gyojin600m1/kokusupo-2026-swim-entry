@@ -258,9 +258,41 @@ def parse_relay_start(data):
                 if any(268 <= w['x0'] < 292 and re.fullmatch(r'\d{1,4}', w['text']) for w in ws):
                     nm = ' '.join(w['text'] for w in ws if 292 <= w['x0'] < 370)
                     gr = ''.join(w['text'] for w in ws if 460 <= w['x0'] < 490)
+                    kn = ''.join(w['text'] for w in ws if 370 <= w['x0'] < 460)
                     if nm and len(cur['members']) < 4:
-                        cur['members'].append((nfkc(nm), gr))
+                        cur['members'].append((nfkc(nm), gr, hira(kn)))
     return head, rows
+
+
+def hira(k):
+    """ﾆｶｲﾄﾞｳ ｱｷﾅ → にかいどうあきな（公式ヨミガナ。検索にだけ使い、画面には出さない）"""
+    k = nfkc(k).replace(' ', '')
+    return ''.join(chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c for c in k)
+
+
+def parse_ind_start(data):
+    """個人種目のスタートリスト PDF → [{pref, name, kana}]"""
+    import pdfplumber
+    rows = []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        first = pdf.pages[0].extract_text() or ''
+        if 'まだ作成されていません' in first or '実施されません' in first:
+            return None
+        for page in pdf.pages:
+            line = collections.defaultdict(list)
+            for w in page.extract_words():
+                line[round(w['top'] / 2)].append(w)
+            for k in sorted(line):
+                ws = sorted(line[k], key=lambda w: w['x0'])
+                w0 = ws[0]
+                if not ((60 <= w0['x0'] < 85 and re.fullmatch(r'\d', w0['text'])) or (w0['x0'] < 85 and w0['text'].startswith('補欠'))):
+                    continue
+                pref = ''.join(w['text'] for w in ws if 85 <= w['x0'] < 140)
+                nm = ''.join(w['text'] for w in ws if 185 <= w['x0'] < 273)
+                kn = ''.join(w['text'] for w in ws if 273 <= w['x0'] < 346)
+                if nm and kn:
+                    rows.append({'pref': pref, 'name': nm, 'kana': hira(kn)})
+    return rows
 
 
 def head_ok(head, p):
@@ -374,6 +406,36 @@ def main():
     os.makedirs(PDFDIR, exist_ok=True)
     tnow = time.time()
 
+    # ===== -2) 公式ヨミガナ：個人種目の予選スタートリストから名簿の読みを差し替える（種目ごとに1回）=====
+    kseen = seen.setdefault('kana', {})
+    sw_by = {}
+    for sw in d['swimmers']:
+        sw_by.setdefault((npref(sw.get('team')), nname(sw.get('name'))), sw)
+    for p in prog:
+        no, dn = p['no'], dayno.get(p['day'], 1)
+        if no in is_relay or p['round'] != '予選' or kseen.get(str(no)):
+            continue
+        code, data, lm = get(f'{SEIKO}/start/{dn:02d}S{no:03d}.pdf')
+        if code != 200 or not data or len(data) < 12000:
+            continue
+        try:
+            rows = parse_ind_start(data)
+        except Exception as ex:
+            log(f'No.{no} スタートリストの読みを取れない: {repr(ex)[:80]}')
+            continue
+        if not rows:
+            continue
+        n_set = 0
+        for r in rows:
+            sw = sw_by.get((npref(r['pref']), nname(r['name'])))
+            if sw is None:
+                continue
+            if sw.get('kana') != r['kana']:
+                sw['kana'] = r['kana']; changed += 1
+            n_set += 1
+        kseen[str(no)] = True
+        log(f'No.{no} 公式の読みを名簿に反映: {n_set}/{len(rows)}名')
+
     # ===== -1) リレーのスタートリスト：泳者4名を先に入れ、個人種目の無い選手を名簿に足す =====
     rs = seen.setdefault('rstart', {})
     names_by_pref = {}
@@ -422,18 +484,22 @@ def main():
             if e is None:
                 unmatched.append(f'No.{no}(リレーSL) {r["team"]}')
                 continue
-            mem = [n for n, g in r['members']]
+            mem = [m[0] for m in r['members']]
             if mem and not e.get('result') and e.get('members') != mem:
                 e['members'] = mem                       # 結果が出るまでは申告の泳順
                 changed += 1
             pref = npref(r['team'])
             have = names_by_pref.setdefault(pref, set())
-            for n, g in r['members']:
+            for n, g, kn in r['members']:
                 if nname(n) in have:
+                    if kn:
+                        for sw in d['swimmers']:
+                            if npref(sw.get('team')) == pref and nname(sw.get('name')) == nname(n) and sw.get('kana') != kn:
+                                sw['kana'] = kn; changed += 1
                     continue
                 d['entries'].append({'name': n, 'team': pref, 'gender': p['gender'], 'grade': cat,
                                      'entryType': 'リレーのみ', 'programNos': []})
-                d['swimmers'].append({'name': n, 'team': pref, 'gender': p['gender'], 'grade': cat})
+                d['swimmers'].append({'name': n, 'team': pref, 'gender': p['gender'], 'grade': cat, 'kana': kn or ''})
                 have.add(nname(n))
                 n_new += 1
             n_ok += 1
